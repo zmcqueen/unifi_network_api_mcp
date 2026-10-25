@@ -5,6 +5,7 @@ import logging
 from typing import Dict, Any, Optional, List, Union
 from urllib.parse import urljoin, quote
 
+import certifi
 import httpx
 from httpx import HTTPStatusError, TimeoutException, ConnectError
 
@@ -41,6 +42,8 @@ class UniFiClient:
             base_url=self.base_url,
             headers=self.headers,
             timeout=httpx.Timeout(settings.api_timeout),
+            # api.ui.com always uses the public CA bundle, whatever SSL_CERT_FILE says
+            verify=certifi.where() if settings.uses_cloud_connector else settings.verify_ssl,
         )
         return self
     
@@ -70,7 +73,7 @@ class UniFiClient:
         request_path = error_data.get("requestPath")
         
         # Map status codes to specific exceptions
-        if status_code == 401:
+        if status_code in (401, 403):
             raise UniFiAuthError(
                 message,
                 status_code=status_code,
