@@ -92,6 +92,7 @@ class WLANStandard(str, Enum):
     IEEE_802_11N = "802.11n"
     IEEE_802_11AC = "802.11ac"
     IEEE_802_11AX = "802.11ax"
+    IEEE_802_11BE = "802.11be"
 
 
 class ClientType(str, Enum):
@@ -130,22 +131,33 @@ class ClientAction(str, Enum):
     UNAUTHORIZE_GUEST_ACCESS = "UNAUTHORIZE_GUEST_ACCESS"
 
 
+# Enum values reported by the controller grow with new hardware (e.g. 802.11be
+# radios), so response fields accept unknown strings instead of failing the
+# whole response.
+DeviceStateValue = Union[DeviceState, str]
+PoEStandardValue = Union[PoEStandard, str]
+PortStateValue = Union[PortState, str]
+PortConnectorValue = Union[PortConnector, str]
+WLANStandardValue = Union[WLANStandard, str]
+ClientAccessTypeValue = Union[ClientAccessType, str]
+
+
 # Device models
 class PoEInfo(BaseModel):
     """PoE information for a port."""
-    
-    standard: PoEStandard
+
+    standard: PoEStandardValue
     type: int
     enabled: bool
-    state: PortState
+    state: PortStateValue
 
 
 class Port(BaseModel):
     """Device port information."""
-    
+
     idx: int = Field(description="Port index")
-    state: PortState
-    connector: PortConnector
+    state: PortStateValue
+    connector: PortConnectorValue
     maxSpeedMbps: int = Field(description="Maximum speed in Mbps")
     speedMbps: Optional[int] = Field(None, description="Current speed in Mbps")
     poe: Optional[PoEInfo] = None
@@ -153,9 +165,9 @@ class Port(BaseModel):
 
 class Radio(BaseModel):
     """Device radio information."""
-    
-    wlanStandard: WLANStandard
-    frequencyGHz: float = Field(description="Frequency band (2.4 or 5)")
+
+    wlanStandard: WLANStandardValue
+    frequencyGHz: float = Field(description="Frequency band (2.4, 5 or 6)")
     channelWidthMHz: int = Field(description="Channel width in MHz")
     channel: Optional[int] = Field(None, description="Channel number")
 
@@ -188,7 +200,7 @@ class Device(BaseModel):
     model: str = Field(description="Device model")
     macAddress: str = Field(description="MAC address")
     ipAddress: Optional[str] = Field(None, description="IP address")
-    state: DeviceState
+    state: DeviceStateValue
     features: Optional[Union[List[DeviceFeature], DeviceFeatures]] = None
     interfaces: Optional[Union[List[DeviceInterface], DeviceInterfaces]] = None
 
@@ -208,16 +220,20 @@ class DeviceDetails(Device):
 
 
 class DeviceStatistics(BaseModel):
-    """Device statistics."""
-    
-    uptimeSec: int = Field(description="Uptime in seconds")
-    lastHeartbeatAt: datetime
-    nextHeartbeatAt: datetime
-    loadAverage1Min: float
-    loadAverage5Min: float
-    loadAverage15Min: float
-    cpuUtilizationPct: float
-    memoryUtilizationPct: float
+    """Device statistics.
+
+    Telemetry fields are optional: low-end devices (e.g. USW Flex Mini) don't
+    report load averages, and offline devices may omit most fields.
+    """
+
+    uptimeSec: Optional[int] = Field(None, description="Uptime in seconds")
+    lastHeartbeatAt: Optional[datetime] = None
+    nextHeartbeatAt: Optional[datetime] = None
+    loadAverage1Min: Optional[float] = None
+    loadAverage5Min: Optional[float] = None
+    loadAverage15Min: Optional[float] = None
+    cpuUtilizationPct: Optional[float] = None
+    memoryUtilizationPct: Optional[float] = None
     uplink: Optional[Dict[str, Any]] = None
     interfaces: Optional[Dict[str, Any]] = None
 
@@ -226,7 +242,7 @@ class DeviceStatistics(BaseModel):
 class ClientAccess(BaseModel):
     """Client access information."""
     
-    type: ClientAccessType
+    type: ClientAccessTypeValue
     authorized: Optional[bool] = None
 
 
