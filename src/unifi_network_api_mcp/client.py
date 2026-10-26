@@ -175,15 +175,19 @@ class UniFiClient:
         response = await self._request_with_retry("GET", path, params=params)
         return response.json()
     
-    async def get_classic(self, site_name: str, path: str) -> List[Dict[str, Any]]:
+    async def get_classic(self, site_name: str, path: str, v2: bool = False) -> Any:
         """GET from the classic Network API, for data the integration API doesn't expose.
         
         site_name is the site's internalReference (e.g. "default"), not its UUID.
+        v1 responses are unwrapped from their {"meta", "data"} envelope; v2 responses are returned as-is.
         """
         network_url = self.base_url.rsplit("/integration/", 1)[0]
-        url = f"{network_url}/api/s/{quote(site_name)}/{path.lstrip('/')}"
+        if v2:
+            url = f"{network_url}/v2/api/site/{quote(site_name)}/{path.lstrip('/')}"
+        else:
+            url = f"{network_url}/api/s/{quote(site_name)}/{path.lstrip('/')}"
         response = await self._request_with_retry("GET", url)
-        return response.json().get("data", [])
+        return response.json() if v2 else response.json().get("data", [])
     
     async def post(
         self,

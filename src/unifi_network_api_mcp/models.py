@@ -263,6 +263,7 @@ class WiredClient(Client):
     type: Literal[ClientType.WIRED] = ClientType.WIRED
     macAddress: str
     uplinkDeviceId: str
+    uplinkPortIdx: Optional[int] = Field(None, description="Port index on the uplink switch (client_details only)")
 
 
 class WirelessClient(Client):
@@ -320,19 +321,33 @@ class DeleteVoucherResponse(BaseModel):
 
 # Network configuration models
 REDACTED = "<redacted>"
-SECRET_FIELDS = {"passphrase", "password", "presharedKey", "sharedSecret", "privateKey", "x_passphrase", "x_password", "x_secret"}
+SECRET_FIELDS = {"passphrase", "password", "presharedKey", "sharedSecret", "privateKey", "utm_token"}
+
+
+def _is_secret(key: str) -> bool:
+    # The classic API prefixes every secret field with "x_" (x_passphrase, x_wireguard_private_key, ...)
+    return key in SECRET_FIELDS or key.startswith("x_")
 
 
 def redact_secrets(value: Any) -> Any:
-    """Replace secret values (Wi-Fi passphrases, shared secrets) so they never reach the MCP client."""
+    """Replace secret values (Wi-Fi passphrases, shared secrets, private keys) so they never reach the MCP client."""
     if isinstance(value, dict):
-        return {k: REDACTED if k in SECRET_FIELDS and v else redact_secrets(v) for k, v in value.items()}
+        return {k: REDACTED if _is_secret(k) and v else redact_secrets(v) for k, v in value.items()}
     if isinstance(value, list):
         return [redact_secrets(v) for v in value]
     return value
 
 
-class ConfigObject(BaseModel):
+class Redacted(BaseModel):
+    """Base for models carrying raw configuration; secrets are redacted on validation."""
+    
+    @model_validator(mode="before")
+    @classmethod
+    def _redact(cls, data: Any) -> Any:
+        return redact_secrets(data)
+
+
+class ConfigObject(Redacted):
     """Base for configuration objects.
     
     Only the commonly used fields are typed; everything else the controller returns
@@ -340,11 +355,6 @@ class ConfigObject(BaseModel):
     """
     
     model_config = ConfigDict(extra="allow")
-    
-    @model_validator(mode="before")
-    @classmethod
-    def _redact(cls, data: Any) -> Any:
-        return redact_secrets(data)
 
 
 class ObjectMetadata(BaseModel):
@@ -418,6 +428,37 @@ class PortForward(ConfigObject):
     fwd_port: Optional[str] = Field(None, description="Internal port(s)")
     src_limiting_enabled: Optional[bool] = Field(None, description="Whether source addresses are restricted")
     log: Optional[bool] = None
+
+
+class ClassicConfigObject(ConfigObject):
+    """Configuration object from the classic Network API (snake_case fields, passed through as returned).
+    
+    Classic IDs differ from integration API IDs for the same object; match on name.
+    """
+    
+    id: str = Field(validation_alias="_id", description="Classic API ID")
+    name: Optional[str] = None
+
+
+class SwitchPortConfig(BaseModel):
+    """Switch port VLAN and PoE configuration."""
+    
+    idx: int = Field(description="Port index")
+    name: Optional[str] = None
+    up: Optional[bool] = None
+    enabled: Optional[bool] = None
+    speedMbps: Optional[int] = None
+    isUplink: Optional[bool] = None
+    overridden: bool = Field(description="False means the port uses the switch's default port profile")
+    portProfile: Optional[str] = Field(None, description="Port profile name, if one is assigned")
+    forward: Optional[str] = Field(None, description="all, native, customize or disabled")
+    nativeNetwork: Optional[str] = Field(None, description="Native (untagged) network; null when not overridden")
+    taggedVlanMgmt: Optional[str] = Field(None, description="auto (all VLANs tagged), block_all or custom")
+    taggedNetworks: Optional[List[str]] = Field(None, description="Tagged networks when taggedVlanMgmt is custom")
+    excludedNetworks: Optional[List[str]] = Field(None, description="Networks excluded from tagging")
+    poeMode: Optional[str] = Field(None, description="auto, off, pasv24, passthrough; null if the port has no PoE")
+    poePowerW: Optional[float] = None
+    portSecurityEnabled: Optional[bool] = None
 
 
 # Action request models
@@ -511,3 +552,54 @@ class PortForwardsResult(BaseModel):
     
     portForwards: List[PortForward]
     totalCount: int
+
+
+class TrafficMatchingListsResult(Redacted):
+    """Result from listing traffic matching lists (firewall match objects)."""
+    
+    trafficMatchingLists: List[Dict[str, Any]]
+    totalCount: int
+
+
+class NetworkServicesResult(Redacted):
+    """Per-network DHCP/DNS/multicast settings plus the site-wide multicast and DNS settings."""
+    
+    networks: List[ClassicConfigObject] = Field(description="LAN and VPN networks (WANs excluded)")
+    mdns: Optional[Dict[str, Any]] = Field(None, description="Site-wide mDNS reflector settings")
+    igmpSnooping: Optional[Dict[str, Any]] = Field(None, description="Site-wide IGMP snooping settings")
+    dnsOverHttps: Optional[Dict[str, Any]] = Field(None, description="Gateway DNS-over-HTTPS settings")
+
+
+class WifiAdvancedSettingsResult(Redacted):
+    """Classic WiFi settings per SSID, with network and AP group names resolved."""
+    
+    wifiNetworks: List[ClassicConfigObject]
+    apGroups: List[Dict[str, Any]]
+
+
+class VpnResult(Redacted):
+    """VPN servers, VPN client networks and Teleport."""
+    
+    servers: List[Dict[str, Any]] = Field(description="VPN servers with the firewall zone they belong to")
+    clientNetworks: List[ClassicConfigObject] = Field(description="Networks assigned to VPN clients (subnet, DNS, zone)")
+    teleport: Optional[Dict[str, Any]] = Field(None, description="Teleport enabled flag and client subnet")
+    siteToSiteMagicVpnEnabled: Optional[bool] = None
+
+
+class ThreatManagementResult(Redacted):
+    """IDS/IPS, DNS/ad filtering and content filtering settings."""
+    
+    ips: Optional[Dict[str, Any]] = Field(None, description="IDS/IPS mode, categories, ad blocking, DNS filtering, honeypot")
+    ipsSuppression: Optional[Dict[str, Any]] = Field(None, description="Suppressed alerts and allow-listed traffic")
+    contentFiltering: Any = Field(None, description="Content filtering profiles")
+    dpi: Optional[Dict[str, Any]] = Field(None, description="Deep packet inspection settings")
+
+
+class SwitchPortsResult(Redacted):
+    """Per-port configuration of a switch (or gateway's built-in switch)."""
+    
+    deviceId: str
+    deviceName: Optional[str] = None
+    model: Optional[str] = None
+    ports: List[SwitchPortConfig]
+    portProfiles: List[Dict[str, Any]] = Field(description="Port profiles defined on the site")

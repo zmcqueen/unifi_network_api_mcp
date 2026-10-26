@@ -2,6 +2,7 @@
 
 import logging
 from typing import Annotated, Optional, List, Union
+from urllib.parse import quote
 
 from fastmcp import FastMCP
 from pydantic import Field
@@ -32,6 +33,13 @@ from unifi_network_api_mcp.models import (
     FirewallZonesResult,
     FirewallPoliciesResult,
     PortForwardsResult,
+    TrafficMatchingListsResult,
+    NetworkServicesResult,
+    WifiAdvancedSettingsResult,
+    VpnResult,
+    ThreatManagementResult,
+    SwitchPortConfig,
+    SwitchPortsResult,
 )
 from unifi_network_api_mcp.settings import settings
 
@@ -132,6 +140,13 @@ async def client_details(
         # Parse client based on type
         client_type = data.get("type")
         if client_type == "WIRED":
+            # The switch port is only in the classic API; don't fail the call if it's unavailable
+            try:
+                site_name = await _site_name(client, site_id)
+                sta = await client.get_classic(site_name, f"stat/sta/{quote(data['macAddress'].lower())}")
+                data["uplinkPortIdx"] = sta[0].get("sw_port") if sta else None
+            except Exception as e:
+                logger.warning(f"Could not look up switch port for client {client_id}: {e}")
             return WiredClient(**data)
         elif client_type == "WIRELESS":
             return WirelessClient(**data)
@@ -217,13 +232,157 @@ async def port_forwards(
 ) -> PortForwardsResult:
     """List port forwarding rules on a site."""
     async with UniFiClient() as client:
-        # Port forwards are only in the classic API, which addresses sites by name
-        sites = await client.get_paginated("sites")
-        site = next((s for s in sites if s["id"] == site_id), None)
-        if site is None:
-            raise ValueError(f"Site {site_id} not found")
-        rules = await client.get_classic(site["internalReference"], "rest/portforward")
+        # Port forwards are only in the classic API
+        rules = await client.get_classic(await _site_name(client, site_id), "rest/portforward")
         return PortForwardsResult(portForwards=rules, totalCount=len(rules))
+
+
+@unifi_mcp.tool
+async def traffic_matching_lists(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> TrafficMatchingListsResult:
+    """List traffic matching lists (IP/port/domain groups) that firewall policies can reference."""
+    async with UniFiClient() as client:
+        lists = await client.get_paginated(f"sites/{site_id}/traffic-matching-lists")
+        return TrafficMatchingListsResult(trafficMatchingLists=lists, totalCount=len(lists))
+
+
+@unifi_mcp.tool
+async def network_services(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> NetworkServicesResult:
+    """Get per-network DHCP options, DHCP DNS servers, IGMP snooping and mDNS flags, plus the
+    site-wide mDNS, IGMP snooping and DNS-over-HTTPS settings. Complements network_details."""
+    async with UniFiClient() as client:
+        site_name = await _site_name(client, site_id)
+        networks = await client.get_classic(site_name, "rest/networkconf")
+        settings_by_key = await _classic_settings(client, site_name)
+        return NetworkServicesResult(
+            networks=[n for n in networks if n.get("purpose") != "wan"],
+            mdns=settings_by_key.get("mdns"),
+            igmpSnooping=settings_by_key.get("igmp_snooping"),
+            dnsOverHttps=settings_by_key.get("doh"),
+        )
+
+
+@unifi_mcp.tool
+async def wifi_advanced_settings(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> WifiAdvancedSettingsResult:
+    """Get per-SSID settings not in wifi_broadcast_details: bound network, AP group assignment,
+    bands, multicast enhancement, BSS transition, proxy ARP, minimum data rates, PMF/WPA3 options.
+    Passphrases are redacted."""
+    async with UniFiClient() as client:
+        site_name = await _site_name(client, site_id)
+        wlans = await client.get_classic(site_name, "rest/wlanconf")
+        network_names = {n["_id"]: n.get("name") for n in await client.get_classic(site_name, "rest/networkconf")}
+        ap_groups = await client.get_classic(site_name, "apgroups", v2=True)
+        group_names = {g["_id"]: g.get("name") for g in ap_groups}
+        for wlan in wlans:
+            wlan["networkName"] = network_names.get(wlan.get("networkconf_id"))
+            wlan["apGroupNames"] = [group_names.get(g, g) for g in wlan.get("ap_group_ids") or []]
+        return WifiAdvancedSettingsResult(wifiNetworks=wlans, apGroups=ap_groups)
+
+
+@unifi_mcp.tool
+async def vpn(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> VpnResult:
+    """Get VPN servers and their firewall zone, the networks assigned to VPN clients, and Teleport settings."""
+    async with UniFiClient() as client:
+        site_name = await _site_name(client, site_id)
+        servers = await client.get_paginated(f"sites/{site_id}/vpn/servers")
+        zones = await client.get_paginated(f"sites/{site_id}/firewall/zones")
+        for server in servers:
+            server["firewallZone"] = next((z["name"] for z in zones if server["id"] in z.get("networkIds", [])), None)
+        networks = await client.get_classic(site_name, "rest/networkconf")
+        settings_by_key = await _classic_settings(client, site_name)
+        return VpnResult(
+            servers=servers,
+            clientNetworks=[n for n in networks if n.get("purpose") == "remote-user-vpn"],
+            teleport=settings_by_key.get("teleport"),
+            siteToSiteMagicVpnEnabled=(settings_by_key.get("magic_site_to_site_vpn") or {}).get("enabled"),
+        )
+
+
+@unifi_mcp.tool
+async def threat_management(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> ThreatManagementResult:
+    """Get IDS/IPS mode and enabled categories, ad blocking, DNS filtering, content filtering,
+    honeypot and DPI settings."""
+    async with UniFiClient() as client:
+        site_name = await _site_name(client, site_id)
+        settings_by_key = await _classic_settings(client, site_name)
+        return ThreatManagementResult(
+            ips=settings_by_key.get("ips"),
+            ipsSuppression=settings_by_key.get("ips_suppression"),
+            contentFiltering=await client.get_classic(site_name, "content-filtering", v2=True),
+            dpi=settings_by_key.get("dpi"),
+        )
+
+
+@unifi_mcp.tool
+async def switch_ports(
+    site_id: Annotated[str, Field(description="Site UUID")],
+    device_id: Annotated[str, Field(description="Device UUID of a switch or gateway")]
+) -> SwitchPortsResult:
+    """Get each port's native VLAN, tagged VLANs, port profile and PoE settings."""
+    async with UniFiClient() as client:
+        site_name = await _site_name(client, site_id)
+        device = await client.get(f"sites/{site_id}/devices/{device_id}")
+        stats = await client.get_classic(site_name, f"stat/device/{quote(device['macAddress'].lower())}")
+        if not stats or not stats[0].get("port_table"):
+            raise ValueError(f"Device {device_id} has no switch ports")
+        stat = stats[0]
+        network_names = {n["_id"]: n.get("name") for n in await client.get_classic(site_name, "rest/networkconf")}
+        profiles = await client.get_classic(site_name, "rest/portconf")
+        profile_names = {p["_id"]: p.get("name") for p in profiles}
+        overrides = {o["port_idx"]: o for o in stat.get("port_overrides") or []}
+        names = lambda ids: [network_names.get(i, i) for i in ids] if ids else None
+        
+        ports = []
+        for port in stat["port_table"]:
+            override = overrides.get(port["port_idx"], {})
+            ports.append(SwitchPortConfig(
+                idx=port["port_idx"],
+                name=port.get("name"),
+                up=port.get("up"),
+                enabled=port.get("enable"),
+                speedMbps=port.get("speed"),
+                isUplink=port.get("is_uplink"),
+                overridden=bool(override),
+                portProfile=profile_names.get(override.get("portconf_id")),
+                forward=override.get("forward", port.get("forward")),
+                nativeNetwork=network_names.get(override.get("native_networkconf_id")),
+                taggedVlanMgmt=override.get("tagged_vlan_mgmt"),
+                taggedNetworks=names(override.get("tagged_networkconf_ids")),
+                excludedNetworks=names(override.get("excluded_networkconf_ids")),
+                poeMode=override.get("poe_mode", port.get("poe_mode")) if port.get("port_poe") else None,
+                poePowerW=float(port["poe_power"]) if port.get("port_poe") and port.get("poe_power") else None,
+                portSecurityEnabled=override.get("port_security_enabled"),
+            ))
+        return SwitchPortsResult(
+            deviceId=device_id,
+            deviceName=device.get("name"),
+            model=device.get("model"),
+            ports=ports,
+            portProfiles=profiles,
+        )
+
+
+async def _site_name(client: UniFiClient, site_id: str) -> str:
+    """Map a site UUID to the name the classic API uses (its internalReference, e.g. "default")."""
+    sites = await client.get_paginated("sites")
+    site = next((s for s in sites if s["id"] == site_id), None)
+    if site is None:
+        raise ValueError(f"Site {site_id} not found")
+    return site["internalReference"]
+
+
+async def _classic_settings(client: UniFiClient, site_name: str) -> dict:
+    """Return the classic site settings keyed by section (ips, mdns, teleport, ...)."""
+    return {s["key"]: s for s in await client.get_classic(site_name, "rest/setting")}
 
 
 # Tools - State-modifying operations

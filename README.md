@@ -25,6 +25,18 @@ A Model Context Protocol (MCP) server that provides access to UniFi Network Cont
 - `firewall_zones(site_id)` - List firewall zones and their networks
 - `firewall_policies(site_id)` - List zone-based firewall policies
 - `port_forwards(site_id)` - List port forwarding rules
+- `traffic_matching_lists(site_id)` - List IP/port/domain groups used by firewall policies
+- `network_services(site_id)` - Get DHCP options, DHCP DNS servers, IGMP snooping and mDNS settings
+- `wifi_advanced_settings(site_id)` - Get per-SSID network binding, AP groups, bands, multicast and roaming options
+- `vpn(site_id)` - Get VPN servers and their firewall zone, VPN client networks and Teleport settings
+- `threat_management(site_id)` - Get IDS/IPS, ad blocking, DNS filtering and content filtering settings
+- `switch_ports(site_id, device_id)` - Get each port's native/tagged VLANs, port profile and PoE settings
+
+`client_details` also returns `uplinkPortIdx` (the switch port) for wired clients.
+
+Tools that read settings the official integration API doesn't expose (port forwards, the last five
+above, and `uplinkPortIdx`) use the classic Network API, which is undocumented and may change between
+Network versions. Secrets such as WiFi passphrases and VPN private keys are redacted in all tool output.
 
 #### Write Operations
 
