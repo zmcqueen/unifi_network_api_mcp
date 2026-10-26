@@ -25,6 +25,13 @@ from unifi_network_api_mcp.models import (
     AuthorizeGuestRequest,
     UnauthorizeGuestRequest,
     ClientAction,
+    Network,
+    NetworksResult,
+    WifiBroadcast,
+    WifiBroadcastsResult,
+    FirewallZonesResult,
+    FirewallPoliciesResult,
+    PortForwardsResult,
 )
 from unifi_network_api_mcp.settings import settings
 
@@ -140,6 +147,83 @@ async def vouchers(
     async with UniFiClient() as client:
         vouchers = await client.get_paginated(f"sites/{site_id}/hotspot/vouchers")
         return VouchersResult(vouchers=vouchers, totalCount=len(vouchers))
+
+
+@unifi_mcp.tool
+async def networks(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> NetworksResult:
+    """List networks (LANs/VLANs) on a site. Use network_details for subnet and DHCP settings."""
+    async with UniFiClient() as client:
+        networks = await client.get_paginated(f"sites/{site_id}/networks")
+        return NetworksResult(networks=networks, totalCount=len(networks))
+
+
+@unifi_mcp.tool
+async def network_details(
+    site_id: Annotated[str, Field(description="Site UUID")],
+    network_id: Annotated[str, Field(description="Network UUID")]
+) -> Network:
+    """Get a network's full configuration, including VLAN, IPv4/IPv6 subnet, DHCP and isolation settings."""
+    async with UniFiClient() as client:
+        data = await client.get(f"sites/{site_id}/networks/{network_id}")
+        return Network(**data)
+
+
+@unifi_mcp.tool
+async def wifi_broadcasts(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> WifiBroadcastsResult:
+    """List WiFi networks (SSIDs) on a site. Use wifi_broadcast_details for security and radio settings."""
+    async with UniFiClient() as client:
+        broadcasts = await client.get_paginated(f"sites/{site_id}/wifi/broadcasts")
+        return WifiBroadcastsResult(wifiBroadcasts=broadcasts, totalCount=len(broadcasts))
+
+
+@unifi_mcp.tool
+async def wifi_broadcast_details(
+    site_id: Annotated[str, Field(description="Site UUID")],
+    wifi_broadcast_id: Annotated[str, Field(description="WiFi broadcast UUID")]
+) -> WifiBroadcast:
+    """Get a WiFi network's full configuration (security mode, client isolation, hidden SSID, etc.). Passphrases are redacted."""
+    async with UniFiClient() as client:
+        data = await client.get(f"sites/{site_id}/wifi/broadcasts/{wifi_broadcast_id}")
+        return WifiBroadcast(**data)
+
+
+@unifi_mcp.tool
+async def firewall_zones(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> FirewallZonesResult:
+    """List firewall zones on a site and the networks assigned to each."""
+    async with UniFiClient() as client:
+        zones = await client.get_paginated(f"sites/{site_id}/firewall/zones")
+        return FirewallZonesResult(zones=zones, totalCount=len(zones))
+
+
+@unifi_mcp.tool
+async def firewall_policies(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> FirewallPoliciesResult:
+    """List zone-based firewall policies on a site, including system-defined ones. Zones are referenced by UUID; see firewall_zones."""
+    async with UniFiClient() as client:
+        policies = await client.get_paginated(f"sites/{site_id}/firewall/policies")
+        return FirewallPoliciesResult(policies=policies, totalCount=len(policies))
+
+
+@unifi_mcp.tool
+async def port_forwards(
+    site_id: Annotated[str, Field(description="Site UUID")]
+) -> PortForwardsResult:
+    """List port forwarding rules on a site."""
+    async with UniFiClient() as client:
+        # Port forwards are only in the classic API, which addresses sites by name
+        sites = await client.get_paginated("sites")
+        site = next((s for s in sites if s["id"] == site_id), None)
+        if site is None:
+            raise ValueError(f"Site {site_id} not found")
+        rules = await client.get_classic(site["internalReference"], "rest/portforward")
+        return PortForwardsResult(portForwards=rules, totalCount=len(rules))
 
 
 # Tools - State-modifying operations

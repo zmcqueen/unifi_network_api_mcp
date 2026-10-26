@@ -175,6 +175,16 @@ class UniFiClient:
         response = await self._request_with_retry("GET", path, params=params)
         return response.json()
     
+    async def get_classic(self, site_name: str, path: str) -> List[Dict[str, Any]]:
+        """GET from the classic Network API, for data the integration API doesn't expose.
+        
+        site_name is the site's internalReference (e.g. "default"), not its UUID.
+        """
+        network_url = self.base_url.rsplit("/integration/", 1)[0]
+        url = f"{network_url}/api/s/{quote(site_name)}/{path.lstrip('/')}"
+        response = await self._request_with_retry("GET", url)
+        return response.json().get("data", [])
+    
     async def post(
         self,
         path: str,

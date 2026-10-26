@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Literal, Union
 from enum import Enum
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class PaginatedResponse(BaseModel):
@@ -318,6 +318,108 @@ class DeleteVoucherResponse(BaseModel):
     vouchersDeleted: int
 
 
+# Network configuration models
+REDACTED = "<redacted>"
+SECRET_FIELDS = {"passphrase", "password", "presharedKey", "sharedSecret", "privateKey", "x_passphrase", "x_password", "x_secret"}
+
+
+def redact_secrets(value: Any) -> Any:
+    """Replace secret values (Wi-Fi passphrases, shared secrets) so they never reach the MCP client."""
+    if isinstance(value, dict):
+        return {k: REDACTED if k in SECRET_FIELDS and v else redact_secrets(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact_secrets(v) for v in value]
+    return value
+
+
+class ConfigObject(BaseModel):
+    """Base for configuration objects.
+    
+    Only the commonly used fields are typed; everything else the controller returns
+    is passed through so new firmware fields don't break validation. Secrets are redacted.
+    """
+    
+    model_config = ConfigDict(extra="allow")
+    
+    @model_validator(mode="before")
+    @classmethod
+    def _redact(cls, data: Any) -> Any:
+        return redact_secrets(data)
+
+
+class ObjectMetadata(BaseModel):
+    """Where a configuration object came from."""
+    
+    model_config = ConfigDict(extra="allow")
+    
+    origin: Optional[str] = Field(None, description="SYSTEM_DEFINED or USER_DEFINED")
+    configurable: Optional[bool] = None
+
+
+class Network(ConfigObject):
+    """Network (LAN/VLAN) configuration. Details include IPv4/IPv6 and DHCP settings."""
+    
+    id: str = Field(description="Network UUID")
+    name: str
+    enabled: Optional[bool] = None
+    management: Optional[str] = Field(None, description="e.g. GATEWAY, SWITCH, UNMANAGED")
+    vlanId: Optional[int] = None
+    default: Optional[bool] = None
+    zoneId: Optional[str] = Field(None, description="Firewall zone UUID")
+    metadata: Optional[ObjectMetadata] = None
+
+
+class WifiBroadcast(ConfigObject):
+    """WiFi network (SSID) configuration. Passphrases are redacted."""
+    
+    id: str = Field(description="WiFi broadcast UUID")
+    name: str = Field(description="SSID")
+    type: Optional[str] = Field(None, description="e.g. STANDARD, IOT_OPTIMIZED")
+    enabled: Optional[bool] = None
+    network: Optional[Dict[str, Any]] = Field(None, description="Network the SSID is bridged to")
+    securityConfiguration: Optional[Dict[str, Any]] = None
+    metadata: Optional[ObjectMetadata] = None
+
+
+class FirewallZone(ConfigObject):
+    """Firewall zone."""
+    
+    id: str = Field(description="Zone UUID")
+    name: str
+    networkIds: List[str] = Field(default_factory=list, description="Network UUIDs in this zone")
+    metadata: Optional[ObjectMetadata] = None
+
+
+class FirewallPolicy(ConfigObject):
+    """Zone-based firewall policy."""
+    
+    id: str = Field(description="Policy UUID")
+    name: str
+    enabled: Optional[bool] = None
+    index: Optional[int] = Field(None, description="Evaluation order (lower runs first)")
+    action: Optional[Dict[str, Any]] = Field(None, description="ALLOW/BLOCK/REJECT and options")
+    source: Optional[Dict[str, Any]] = Field(None, description="Source zone and traffic filter")
+    destination: Optional[Dict[str, Any]] = Field(None, description="Destination zone and traffic filter")
+    ipProtocolScope: Optional[Dict[str, Any]] = None
+    loggingEnabled: Optional[bool] = None
+    metadata: Optional[ObjectMetadata] = None
+
+
+class PortForward(ConfigObject):
+    """Port forwarding rule (from the classic Network API, field names as returned)."""
+    
+    id: str = Field(validation_alias="_id", description="Rule ID")
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    proto: Optional[str] = Field(None, description="tcp, udp or tcp_udp")
+    pfwd_interface: Optional[str] = Field(None, description="WAN interface(s) the rule listens on")
+    dst_port: Optional[str] = Field(None, description="External port(s)")
+    fwd: Optional[str] = Field(None, description="Internal IP address forwarded to")
+    fwd_port: Optional[str] = Field(None, description="Internal port(s)")
+    src_limiting_enabled: Optional[bool] = Field(None, description="Whether source addresses are restricted")
+    log: Optional[bool] = None
+
+
 # Action request models
 class DeviceActionRequest(BaseModel):
     """Request to perform device action."""
@@ -373,4 +475,39 @@ class VouchersResult(BaseModel):
     """Result from listing vouchers."""
     
     vouchers: List[Voucher]
+    totalCount: int
+
+
+class NetworksResult(BaseModel):
+    """Result from listing networks."""
+    
+    networks: List[Network]
+    totalCount: int
+
+
+class WifiBroadcastsResult(BaseModel):
+    """Result from listing WiFi broadcasts."""
+    
+    wifiBroadcasts: List[WifiBroadcast]
+    totalCount: int
+
+
+class FirewallZonesResult(BaseModel):
+    """Result from listing firewall zones."""
+    
+    zones: List[FirewallZone]
+    totalCount: int
+
+
+class FirewallPoliciesResult(BaseModel):
+    """Result from listing firewall policies."""
+    
+    policies: List[FirewallPolicy]
+    totalCount: int
+
+
+class PortForwardsResult(BaseModel):
+    """Result from listing port forwarding rules."""
+    
+    portForwards: List[PortForward]
     totalCount: int
